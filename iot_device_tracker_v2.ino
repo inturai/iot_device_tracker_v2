@@ -331,8 +331,14 @@ void setup() {
   Serial.begin(115200);
   Serial.setRxBufferSize(SERIAL_BUFFER_SIZE);
 
-  while (!Serial)
-    ;
+  // *** MODIFICATION 1: Initial Power Stabilization Delay ***
+  delay(500);  // Wait 500ms for external power circuits/regulator to stabilize
+
+  // Standard guard for boards with native USB Serial
+  if (Serial)
+    while (!Serial) {
+      delay(1);
+    }
 
   // Set CPU frequency for better performance/power balance
   setCpuFrequencyMhz(160);
@@ -371,6 +377,3 @@ void loop() {
     }
   }
 }
-/*
-2:{ "ssid":"TheZone","ssid_password":"babugaru01","mqtt_server":"3.216.190.129","mqtt_username":"msg_broker","mqtt_password":"TJUS68732bsQWE","mqtt_port":1883,"tenant_id":"T001","device_id":"AP1V2","rssi_filter": -100,"scan_interval":10000,"publish_interval":15000,"device_ttl":30000, "geofence_radius":8 }
-*/

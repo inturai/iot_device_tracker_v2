@@ -230,6 +230,7 @@ public:
     }
     WiFi.disconnect(true);
     WiFi.mode(WIFI_MODE_STA);
+    
     WiFi.begin(ssid.c_str(), password.c_str());
     if (DEBUG && Serial) Serial.printf("[WIFI DEBUG] Attempting to connect to: %s\n", ssid.c_str());
 
