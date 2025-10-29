@@ -855,24 +855,23 @@ void DeviceScannerV4::printDiscoveredDevices() {
 // --- JSON function implementation (Refactored for Minimal Payload and Numeric Type) ---
 // --- JSON function implementation (COMPLETED with 'mid' Master ID) ---
 std::string DeviceScannerV4::getDevicesGroupedByTypeAsJson(uint8_t maxWifi, uint8_t maxBle) {
-  // 4096 is a safer size after removals, but could likely be smaller.
-  DynamicJsonDocument doc(4096);
+  // Use a generous buffer size (e.g., 4096 or MQTT_BUFFER_SIZE)
+  DynamicJsonDocument doc(MQTT_BUFFER_SIZE);
 
-  //DEBUG
-  doc["c"] = _meg_counter++;
-
-  // Key compression: "id" and "t" (tenant) retained for top-level context
-  doc["id"] = device_id;
-  doc["t"] = tenant_id;
+  // 1. Top-Level Field
+  doc["device_id"] = device_id;
 
   JsonArray wifiArray = doc.createNestedArray("wifi");
   JsonArray bleArray = doc.createNestedArray("ble");
 
+  // --- Aggregation and Sorting Setup (Kept for correctness) ---
+  // Group devices by their correlation ID
   std::map<uint32_t, std::vector<const DeviceInfo*>> grouped;
   for (auto const& [id, info] : discovered_devices) {
     grouped[info.correlatedID].push_back(&info);
   }
 
+  // Sort groups by strongest RSSI
   std::vector<std::pair<uint32_t, std::vector<const DeviceInfo*>>> sortedGroups(grouped.begin(), grouped.end());
   std::sort(sortedGroups.begin(), sortedGroups.end(),
             [](auto const& a, auto const& b) {
@@ -889,113 +888,80 @@ std::string DeviceScannerV4::getDevicesGroupedByTypeAsJson(uint8_t maxWifi, uint
 
   uint8_t local_wifiCount = 0;
   uint8_t local_bleCount = 0;
-  unsigned long currentMillis = millis();  // Get time once
 
+  // --- Iterate and Populate JSON ---
   for (auto const& grp : sortedGroups) {
     const std::vector<const DeviceInfo*>& devices = grp.second;
     if (devices.empty()) continue;
 
     int strongestRSSI = INT_MIN;
-    unsigned long recentTime = 0;
     const char* name = "";
     const char* type_str = "";
-    int type_int = -1;
-    uint32_t correlatedID_num = grp.first;  // Get the correlation ID
+    std::string primary_mac_address;
 
-    std::set<std::string> all_formatted_macs;
-    std::string master_id;  // Master ID to be the static MAC
-
+    // Aggregate properties from all devices in the correlated group
     for (auto const& dev : devices) {
       if (dev->rssi > strongestRSSI) {
         strongestRSSI = dev->rssi;
         name = dev->name;
         type_str = dev->type;
-        recentTime = dev->timestamp;
       }
+
+      // Get the MAC for the 'Address' field (any MAC for the group will do,
+      // but the first one found is used here).
       for (auto const& [mac_num, status_ptr] : dev->macs) {
-        std::string mac_str = uint64ToMacString(mac_num);
-        // Check if the MAC is randomized ('R') or BLE ('B')
-        bool is_randomized_or_ble = (strcmp(status_ptr, "R") == 0) || (strcmp(status_ptr, "B") == 0);
-
-        if (is_randomized_or_ble) {
-          mac_str += "*";
-        } else if (master_id.empty()) {
-          // Found the static MAC ("A") and haven't set the master_id yet
-          master_id = mac_str;
+        if (primary_mac_address.empty()) {
+          primary_mac_address = uint64ToMacString(mac_num);
+          break;  // Use the first MAC found
         }
-        all_formatted_macs.insert(mac_str);
       }
     }
 
-    // Fallback for Master ID: If no static MAC was seen, use the first MAC in the set.
-    if (master_id.empty() && !all_formatted_macs.empty()) {
-      // Use the first MAC found, which might be randomized
-      master_id = *all_formatted_macs.begin();
-    }
+    bool is_wifi_ap = (strcmp(type_str, "Wi-Fi AP") == 0);
+    bool is_wifi_client = (strcmp(type_str, "Wi-Fi Client") == 0);
+    bool is_ble = (strcmp(type_str, "BLE") == 0);
+    bool is_wifi = is_wifi_ap || is_wifi_client;
 
-    bool is_wifi = false;
-
-    // Determine numerical type (0, 1, 2) and if it's Wi-Fi
-    if (strcmp(type_str, "Wi-Fi AP") == 0) {
-      type_int = 0;
-      is_wifi = true;
-    } else if (strcmp(type_str, "Wi-Fi Client") == 0) {
-      type_int = 1;
-      is_wifi = true;
-    } else if (strcmp(type_str, "BLE") == 0) {
-      type_int = 2;
-      is_wifi = false;
-    } else {
+    if ((is_wifi && local_wifiCount >= maxWifi) || (is_ble && local_bleCount >= maxBle)) {
       continue;
     }
 
-    if ((is_wifi && local_wifiCount >= maxWifi) || (!is_wifi && local_bleCount >= maxBle)) {
-      continue;
-    }
+    // --- JSON Object Population ---
 
-    JsonObject obj = (is_wifi) ? wifiArray.createNestedObject() : bleArray.createNestedObject();
+    if (is_wifi) {
+      if (local_wifiCount < maxWifi) {
+        JsonObject obj = wifiArray.createNestedObject();
 
-    if (is_wifi) local_wifiCount++;
-    else local_bleCount++;
+        // Wi-Fi objects use "SSID" (Name) and "RSSI"
+        obj["SSID"] = name;
+        obj["RSSI"] = strongestRSSI;
 
-    // --- PAYLOAD MINIFICATION ---
+        local_wifiCount++;
+      }
+    } else if (is_ble) {
+      if (local_bleCount < maxBle) {
+        JsonObject obj = bleArray.createNestedObject();
 
-    // 1. Master ID (mid): The most stable MAC, used for server tracking
-    if (!master_id.empty()) {
-      obj["mid"] = master_id;
-    }
+        // BLE objects use "Name", "Address", and "RSSI"
+        obj["Name"] = name;
+        obj["Address"] = primary_mac_address;
+        obj["RSSI"] = strongestRSSI;
 
-    // Optional: Include the local correlated ID for debugging/development
-    if (DEBUG) {
-      obj["cid"] = correlatedID_num;
-    }
-
-    // 2. Numerical Type (t)
-    obj["t"] = type_int;
-
-    // 3. Name (n)
-    obj["n"] = name;
-
-    // 4. Absolute RSSI (r): Server must treat this as negative
-    obj["r"] = strongestRSSI;
-
-    // 5. Relative Last Seen (ls): Time in seconds since last detection
-    obj["ls"] = (currentMillis - recentTime) / 1000;
-
-    // 6. Macs (m): Array of ALL MACs with '*' for randomized/BLE ones
-    JsonArray macsJson = obj.createNestedArray("m");
-    for (auto const& mac_str : all_formatted_macs) {
-      macsJson.add(mac_str);
+        local_bleCount++;
+      }
     }
   }
 
-  std::string output;
+  // --- Final Serialization ---
+  std::string dataPayload;
+  dataPayload.reserve(MQTT_BUFFER_SIZE);
 
-  // Sticking to standard JSON for maximum compatibility:
-  serializeJson(doc, output);
+  if (serializeJson(doc, dataPayload) == 0) {
+    if (DEBUG && Serial) Serial.println("[JSON FAILED] Failed to serialize JSON.");
+    return "";
+  }
 
-  doc.clear();
-  return output;
+  return dataPayload;
 }
 
 #endif  // DEVICE_SCANNER_V4_H
