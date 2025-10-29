@@ -1,3 +1,4 @@
+#include "esp32-hal.h"
 #ifndef DEVICE_SCANNER_V4_H
 #define DEVICE_SCANNER_V4_H
 
@@ -17,6 +18,7 @@
 #include <cmath>
 #include <cstring>
 #include "esp_wifi.h"
+#include "country.h"
 
 // --- Configuration ---
 #define DEBUG false
@@ -206,7 +208,7 @@ public:
     const std::string& ssid = "", const std::string& password = "",
     const std::string& mqttServer = "", uint16_t mqttPort = 1883,
     const std::string& mqttUsername = "", const std::string& mqttPassword = "",
-    const std::string& mqttTopic = "devices/data", unsigned long mqttPublishInterval = 10000);
+    const std::string& mqttTopic = "devices/data", unsigned long mqttPublishInterval = 10000, int rssiFilter = -100, const std::string& country = "AU");
 
   // Destructor declaration (CRITICAL FIX)
   ~DeviceScannerV4();
@@ -229,8 +231,8 @@ public:
       return false;
     }
     WiFi.disconnect(true);
+    setWifiCountryByString(country.c_str());
     WiFi.mode(WIFI_MODE_STA);
-    
     WiFi.begin(ssid.c_str(), password.c_str());
     if (DEBUG && Serial) Serial.printf("[WIFI DEBUG] Attempting to connect to: %s\n", ssid.c_str());
 
@@ -260,7 +262,8 @@ public:
     int attempts = 0;
     int baseDelay = 1000;
     while (!mqttClient.connected() && attempts < 5) {
-      if (mqttClient.connect("AAP-V2", mqttUsername.c_str(), mqttPassword.c_str())) {
+      //if (mqttClient.connect("DDNA-V4", mqttUsername.c_str(), mqttPassword.c_str())) {
+      if (mqttClient.connect("AAP-V2", mqttUsername.c_str(), mqttPassword.c_str(), NULL, 0, false, NULL, false)) {
         return true;
       }
       if (attempts < 5) {
@@ -274,6 +277,8 @@ public:
   }
 
 private:
+  //DEBUG Counter
+  int _meg_counter = 0;
   // CRITICAL FIX: Store the pointer to the dynamically allocated callback object
   BLEAdvertisedDeviceCallbacks* pAdvertisedDeviceCallbacks = nullptr;
 
@@ -316,6 +321,10 @@ private:
   PubSubClient mqttClient;
   BLEScan* pBLEScan = nullptr;
 
+  //RSSI filter
+  int rssi_filter = -100;
+  std::string country = "AU";
+
   // --- Private Member Function Implementations (Inline) ---
   void startPromiscuousScan() {
     if (DEBUG && Serial)
@@ -323,6 +332,7 @@ private:
 
     WiFi.disconnect(true);
     WiFi.mode(WIFI_MODE_STA);
+
     esp_wifi_set_promiscuous_rx_cb(wifiPacketHandlerStatic);
     esp_wifi_set_promiscuous(true);
     esp_wifi_set_channel(currentChannel, WIFI_SECOND_CHAN_NONE);
@@ -375,14 +385,14 @@ DeviceScannerV4::DeviceScannerV4(
   const std::string& ssid, const std::string& password,
   const std::string& mqttServer, uint16_t mqttPort,
   const std::string& mqttUsername, const std::string& mqttPassword,
-  const std::string& mqttTopic, unsigned long mqttPublishInterval)
+  const std::string& mqttTopic, unsigned long mqttPublishInterval, int rssiFilter, const std::string& country)
   : tenant_id(tenant_id), device_id(device_id), channelInterval(channelInterval),
     bleScanDuration(bleScanDuration), ttlCheckInterval(ttlCheckInterval),
     ttlInterval(ttlInterval), maxWiFiDevices(maxWiFiDevices),
     maxBLEDevices(maxBLEDevices), maxChannel(maxChannel), ssid(ssid),
     password(password), mqttServer(mqttServer), mqttPort(mqttPort),
     mqttUsername(mqttUsername), mqttPassword(mqttPassword), mqttTopic(mqttTopic),
-    mqttPublishInterval(mqttPublishInterval), mqttClient(espClient) {}
+    mqttPublishInterval(mqttPublishInterval), mqttClient(espClient), rssi_filter(rssiFilter), _meg_counter(0), country(country) {}
 
 // --- Destructor Implementation (CRITICAL FIX) ---
 DeviceScannerV4::~DeviceScannerV4() {
@@ -413,7 +423,7 @@ void DeviceScannerV4::begin() {
   pBLEScan->setInterval(100);
   pBLEScan->setWindow(100);
 
-  if (DEBUG && Serial) Serial.println("AAP V2 Client/AP/BLE Scanner V2 Started (Max Optimized)");
+  if (DEBUG && Serial) Serial.println("DDNA Client/AP/BLE Scanner V4 Started (Max Optimized)");
 
   startPromiscuousScan();
   current_state = STATE_WIFI_PROMISCUOUS_SCAN;
@@ -429,13 +439,13 @@ void DeviceScannerV4::wifiPacketHandlerStatic(void* buffer, wifi_promiscuous_pkt
 void DeviceScannerV4::update() {
   unsigned long currentMillis = millis();
 
-  // 1. TTL Check (Always running)
-  if (currentMillis - previousTTLCheckMillis >= ttlCheckInterval) {
-    previousTTLCheckMillis = currentMillis;
-    removeExpiredEntries();
-    correlationEngine.purgeOldCorrelations(currentMillis);
-    if (DEBUG) printDiscoveredDevices();  // Print only if DEBUG is true
-  }
+  // // 1. TTL Check (Always running)
+  // if (currentMillis - previousTTLCheckMillis >= ttlCheckInterval) {
+  //   previousTTLCheckMillis = currentMillis;
+  //   removeExpiredEntries();
+  //   correlationEngine.purgeOldCorrelations(currentMillis);
+  //   if (DEBUG) printDiscoveredDevices();  // Print only if DEBUG is true
+  // }
 
   // 2. State Machine Logic
   if (current_state == STATE_WIFI_PROMISCUOUS_SCAN) {
@@ -565,7 +575,7 @@ void DeviceScannerV4::sendDataToMqtt() {
   if (jsonData.empty()) {
     if (DEBUG && Serial) Serial.println("[MQTT INFO] JSON data is empty or serialization failed.");
   } else {
-    if (DEBUG && Serial) Serial.printf("[MQTT] Publishing %zu bytes to topic '%s'...\n", jsonData.length(), mqttTopic.c_str());
+    if (DEBUG && Serial) Serial.printf("[MQTT] Publishing msg %zu, %zu bytes to topic '%s'...\n", _meg_counter, jsonData.length(), mqttTopic.c_str());
 
     if (mqttClient.publish(mqttTopic.c_str(), jsonData.c_str())) {
       if (DEBUG && Serial) Serial.println("[MQTT SUCCESS] 🎉 Data published successfully.");
@@ -577,7 +587,7 @@ void DeviceScannerV4::sendDataToMqtt() {
   // Allow MQTT client to process a few loops before disconnecting
   for (int i = 0; i < 20; i++) {
     mqttClient.loop();
-    delay(10);
+    delay(100);
   }
 
   // Free up heap memory aggressively after publishing
@@ -586,12 +596,14 @@ void DeviceScannerV4::sendDataToMqtt() {
   // CRITICAL FIX: Only clear the transient/scanned data.
   // discovered_devices holds the recently scanned data that was just published.
   discovered_devices.clear();
+  removeExpiredEntries();
+  correlationEngine.purgeOldCorrelations(millis());
 
   // DO NOT CLEAR key_to_id_lookup! It is required for fast lookups in the
   // next scan cycle and is part of the correlation bridge to the CorrelationEngine.
 
-  WiFi.disconnect(true);
-  if (DEBUG && Serial) 
+  // DEBUG WiFi.disconnect(true);
+  if (DEBUG && Serial)
     Serial.println("[MQTT] Publishing cycle finished. Wi-Fi disconnected.");
 }
 
@@ -630,6 +642,10 @@ void DeviceScannerV4::wifiPacketHandler(void* buffer, wifi_promiscuous_pkt_type_
   std::string mac_address_str = macToString(source_mac_ptr);
   std::string oui = getOUI(source_mac_ptr);
   int rssi = pkt->rx_ctrl.rssi;
+
+
+  if (rssi < rssi_filter) return;
+
   bool is_randomized = isRandomizedMac(source_mac_ptr);
 
   const char* manufacturer_ptr = getManufacturerFromOUI_ptr(oui);
@@ -699,7 +715,6 @@ void DeviceScannerV4::wifiPacketHandler(void* buffer, wifi_promiscuous_pkt_type_
   discovered_devices[final_id] = newDev;
   key_to_id_lookup[string_key] = final_id;
 }
-
 
 // --- processBLEAdvertisedDevice_impl implementation (Refactored Name Logic) ---
 void MyAdvertisedDeviceCallbacks::onResult(BLEAdvertisedDevice advertisedDevice) {
@@ -822,40 +837,42 @@ void DeviceScannerV4::printDiscoveredDevices() {
 
     std::string id_str = "Device_" + std::to_string(correlatedID_num);
 
-    if (DEBUG && Serial)
-      Serial.printf(
-        "ID: %s | Type: %s | Name: %s | RSSI: %d | MACs: %s | Age: %lus\n",
-        id_str.c_str(),
-        strongestDev->type,
-        strongestDev->name,
-        strongestRSSI,
-        macsStr.c_str(),
-        age);
+    // if (DEBUG && Serial)
+    //   Serial.printf(
+    //     "ID: %s | Type: %s | Name: %s | RSSI: %d | MACs: %s | Age: %lus\n",
+    //     id_str.c_str(),
+    //     strongestDev->type,
+    //     strongestDev->name,
+    //     strongestRSSI,
+    //     macsStr.c_str(),
+    //     age);
   }
   if (DEBUG && Serial) Serial.println("-------------------------------------------------");
   if (DEBUG && Serial) Serial.printf("Total Wi-Fi Devices: %d, Total BLE Devices: %d\n", getWiFiDeviceCount(), getBLEDeviceCount());
 }
 
-// --- JSON function implementation (Target Payload Structure) ---
-// Note: This assumes the header and DeviceInfo structure from the previous context.
+
+// --- JSON function implementation (Refactored for Minimal Payload and Numeric Type) ---
+// --- JSON function implementation (COMPLETED with 'mid' Master ID) ---
 std::string DeviceScannerV4::getDevicesGroupedByTypeAsJson(uint8_t maxWifi, uint8_t maxBle) {
-  // Use a generous buffer size (e.g., 4096 or MQTT_BUFFER_SIZE)
-  DynamicJsonDocument doc(MQTT_BUFFER_SIZE); 
-  
-  // 1. Top-Level Field
-  doc["device_id"] = device_id;
+  // 4096 is a safer size after removals, but could likely be smaller.
+  DynamicJsonDocument doc(4096);
+
+  //DEBUG
+  doc["c"] = _meg_counter++;
+
+  // Key compression: "id" and "t" (tenant) retained for top-level context
+  doc["id"] = device_id;
+  doc["t"] = tenant_id;
 
   JsonArray wifiArray = doc.createNestedArray("wifi");
   JsonArray bleArray = doc.createNestedArray("ble");
 
-  // --- Aggregation and Sorting Setup (Kept for correctness) ---
-  // Group devices by their correlation ID
   std::map<uint32_t, std::vector<const DeviceInfo*>> grouped;
   for (auto const& [id, info] : discovered_devices) {
     grouped[info.correlatedID].push_back(&info);
   }
 
-  // Sort groups by strongest RSSI
   std::vector<std::pair<uint32_t, std::vector<const DeviceInfo*>>> sortedGroups(grouped.begin(), grouped.end());
   std::sort(sortedGroups.begin(), sortedGroups.end(),
             [](auto const& a, auto const& b) {
@@ -872,80 +889,113 @@ std::string DeviceScannerV4::getDevicesGroupedByTypeAsJson(uint8_t maxWifi, uint
 
   uint8_t local_wifiCount = 0;
   uint8_t local_bleCount = 0;
+  unsigned long currentMillis = millis();  // Get time once
 
-  // --- Iterate and Populate JSON ---
   for (auto const& grp : sortedGroups) {
     const std::vector<const DeviceInfo*>& devices = grp.second;
     if (devices.empty()) continue;
 
     int strongestRSSI = INT_MIN;
+    unsigned long recentTime = 0;
     const char* name = "";
     const char* type_str = "";
-    std::string primary_mac_address;
+    int type_int = -1;
+    uint32_t correlatedID_num = grp.first;  // Get the correlation ID
 
-    // Aggregate properties from all devices in the correlated group
+    std::set<std::string> all_formatted_macs;
+    std::string master_id;  // Master ID to be the static MAC
+
     for (auto const& dev : devices) {
       if (dev->rssi > strongestRSSI) {
         strongestRSSI = dev->rssi;
         name = dev->name;
         type_str = dev->type;
+        recentTime = dev->timestamp;
       }
-      
-      // Get the MAC for the 'Address' field (any MAC for the group will do, 
-      // but the first one found is used here).
       for (auto const& [mac_num, status_ptr] : dev->macs) {
-          if (primary_mac_address.empty()) {
-             primary_mac_address = uint64ToMacString(mac_num);
-             break; // Use the first MAC found
-          }
+        std::string mac_str = uint64ToMacString(mac_num);
+        // Check if the MAC is randomized ('R') or BLE ('B')
+        bool is_randomized_or_ble = (strcmp(status_ptr, "R") == 0) || (strcmp(status_ptr, "B") == 0);
+
+        if (is_randomized_or_ble) {
+          mac_str += "*";
+        } else if (master_id.empty()) {
+          // Found the static MAC ("A") and haven't set the master_id yet
+          master_id = mac_str;
+        }
+        all_formatted_macs.insert(mac_str);
       }
     }
 
-    bool is_wifi_ap = (strcmp(type_str, "Wi-Fi AP") == 0);
-    bool is_wifi_client = (strcmp(type_str, "Wi-Fi Client") == 0);
-    bool is_ble = (strcmp(type_str, "BLE") == 0);
-    bool is_wifi = is_wifi_ap || is_wifi_client;
+    // Fallback for Master ID: If no static MAC was seen, use the first MAC in the set.
+    if (master_id.empty() && !all_formatted_macs.empty()) {
+      // Use the first MAC found, which might be randomized
+      master_id = *all_formatted_macs.begin();
+    }
 
-    if ((is_wifi && local_wifiCount >= maxWifi) || (is_ble && local_bleCount >= maxBle)) {
+    bool is_wifi = false;
+
+    // Determine numerical type (0, 1, 2) and if it's Wi-Fi
+    if (strcmp(type_str, "Wi-Fi AP") == 0) {
+      type_int = 0;
+      is_wifi = true;
+    } else if (strcmp(type_str, "Wi-Fi Client") == 0) {
+      type_int = 1;
+      is_wifi = true;
+    } else if (strcmp(type_str, "BLE") == 0) {
+      type_int = 2;
+      is_wifi = false;
+    } else {
       continue;
     }
 
-    // --- JSON Object Population ---
-    
-    if (is_wifi) {
-      if (local_wifiCount < maxWifi) {
-        JsonObject obj = wifiArray.createNestedObject();
-        
-        // Wi-Fi objects use "SSID" (Name) and "RSSI"
-        obj["SSID"] = name;
-        obj["RSSI"] = strongestRSSI;
-        
-        local_wifiCount++;
-      }
-    } else if (is_ble) {
-      if (local_bleCount < maxBle) {
-        JsonObject obj = bleArray.createNestedObject();
-        
-        // BLE objects use "Name", "Address", and "RSSI"
-        obj["Name"] = name;
-        obj["Address"] = primary_mac_address;
-        obj["RSSI"] = strongestRSSI;
-        
-        local_bleCount++;
-      }
+    if ((is_wifi && local_wifiCount >= maxWifi) || (!is_wifi && local_bleCount >= maxBle)) {
+      continue;
+    }
+
+    JsonObject obj = (is_wifi) ? wifiArray.createNestedObject() : bleArray.createNestedObject();
+
+    if (is_wifi) local_wifiCount++;
+    else local_bleCount++;
+
+    // --- PAYLOAD MINIFICATION ---
+
+    // 1. Master ID (mid): The most stable MAC, used for server tracking
+    if (!master_id.empty()) {
+      obj["mid"] = master_id;
+    }
+
+    // Optional: Include the local correlated ID for debugging/development
+    if (DEBUG) {
+      obj["cid"] = correlatedID_num;
+    }
+
+    // 2. Numerical Type (t)
+    obj["t"] = type_int;
+
+    // 3. Name (n)
+    obj["n"] = name;
+
+    // 4. Absolute RSSI (r): Server must treat this as negative
+    obj["r"] = strongestRSSI;
+
+    // 5. Relative Last Seen (ls): Time in seconds since last detection
+    obj["ls"] = (currentMillis - recentTime) / 1000;
+
+    // 6. Macs (m): Array of ALL MACs with '*' for randomized/BLE ones
+    JsonArray macsJson = obj.createNestedArray("m");
+    for (auto const& mac_str : all_formatted_macs) {
+      macsJson.add(mac_str);
     }
   }
-  
-  // --- Final Serialization ---
-  std::string dataPayload;
-  dataPayload.reserve(MQTT_BUFFER_SIZE); 
-  
-  if (serializeJson(doc, dataPayload) == 0) {
-    if (DEBUG && Serial) Serial.println("[JSON FAILED] Failed to serialize JSON.");
-    return "";
-  }
-  
-  return dataPayload;
+
+  std::string output;
+
+  // Sticking to standard JSON for maximum compatibility:
+  serializeJson(doc, output);
+
+  doc.clear();
+  return output;
 }
 
 #endif  // DEVICE_SCANNER_V4_H

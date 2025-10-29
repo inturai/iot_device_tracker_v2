@@ -6,6 +6,7 @@
 #include "DeviceManager.h"
 #include <SecureStorage.h>
 #include <PubSubClient.h>  // Keep this here to ensure PubSubClient is available
+#include "country.h"
 
 // SSL Certificate (you can replace this with your CA certificate string)
 const char* ca_cert = R"rawliteral(
@@ -66,6 +67,7 @@ int scan_interval = 10000;
 
 int publish_interval = 15000;
 int device_ttl = 10000;
+std::string country = "AU";
 
 bool isConfigured = false;
 unsigned long lastSentTime = 0;
@@ -109,7 +111,7 @@ bool loadConfig() {
 
   // "scan_interval":10000,"publish_interval":15000,"device_ttl":30000
   scan_interval = preferences.getInt("scan_interval", 10000);
-  publish_interval = preferences.getInt("publish_interval", 15000);
+  publish_interval = preferences.getInt("pub_int", 15000);
   device_ttl = preferences.getInt("device_ttl", 10000);
 
   TOPIC_DATA = preferences.getString("TOPIC_DATA", "").c_str();
@@ -118,6 +120,7 @@ bool loadConfig() {
   //Device specific configuration
   rssi_filter = preferences.getInt("rssi_filter", -100);
   geofence_radius = preferences.getInt("geofence_radius", 8);
+  country = preferences.getString("country", "AU").c_str();
 
   preferences.end();
 
@@ -139,19 +142,20 @@ bool loadConfig() {
     // Pass std::string objects directly to the constructor (which now accepts std::string)
     deviceScannerV4 = new DeviceScannerV4(
       tenant_id, device_id,
-      13,                                            // 1: maxChannel (int)
-      (unsigned long)1000,                           // 2: channelInterval (unsigned long)
-      (uint32_t)3,                                   // 3: bleScanDuration (uint32_t)
-      (unsigned long)5000,                           // 4: ttlCheckInterval (unsigned long)
-      (unsigned long)device_ttl,                     // 5: ttlInterval (unsigned long, CASTED from int)
-      (uint16_t)20,                                  // 6: maxWiFiDevices (uint16_t)
-      (uint16_t)20,                                  // 7: maxBLEDevices (uint16_t)
-      savedSSID, savedPassword,                      // 8, 9: std::string
-      mqttServer, (uint16_t)mqttPort,                // 10, 11: std::string, uint16_t (CASTED from int)
-      mqttUsername, mqttPassword,                    // 12, 13: std::string
-      TOPIC_DATA, (unsigned long)publish_interval);  // 14, 15: std::string, unsigned long (CASTED from int)
-                                                     // The rest (16, 17) are default arguments or not explicitly passed.
-
+      13,                                           // 1: maxChannel (int)
+      (unsigned long)1000,                          // 2: channelInterval (unsigned long)
+      (uint32_t)3,                                  // 3: bleScanDuration (uint32_t)
+      (unsigned long)5000,                          // 4: ttlCheckInterval (unsigned long)
+      (unsigned long)device_ttl,                    // 5: ttlInterval (unsigned long, CASTED from int)
+      (uint16_t)15,                                 // 6: maxWiFiDevices (uint16_t)
+      (uint16_t)15,                                 // 7: maxBLEDevices (uint16_t)
+      savedSSID, savedPassword,                     // 8, 9: std::string
+      mqttServer, (uint16_t)mqttPort,               // 10, 11: std::string, uint16_t (CASTED from int)
+      mqttUsername, mqttPassword,                   // 12, 13: std::string
+      TOPIC_DATA, (unsigned long)publish_interval,  // 14, 15: std::string, unsigned long (CASTED from int)
+      rssi_filter,                                  // 16 rss_filter
+      country);                                     // 17 rss_filter
+                                                    // The rest (16, 17) are default arguments or not explicitly passed.
     // Note: The previous call was 18 arguments. We removed the extra '3000' argument.
     // The total is 15 arguments explicitly passed, matching the non-default arguments in your previous calls.
 
@@ -231,6 +235,9 @@ JsonObject createJsonData(JsonDocument& doc,
 // Function arguments remain const char* as they are low-level C-functions (WiFi/MQTT)
 bool connectToWiFi(const char* ssid, const char* password, const char* tenant_id) {
   // Serial.print("Connecting to WiFi...");
+
+  setWifiCountryByString(country.c_str());
+
   WiFi.begin(ssid, password);
 
   int attempt = 0;
@@ -327,12 +334,10 @@ bool publishData(const std::string& topic, const std::string& payload) {
   }
 }
 
+
 void setup() {
   Serial.begin(115200);
   Serial.setRxBufferSize(SERIAL_BUFFER_SIZE);
-
-  // *** MODIFICATION 1: Initial Power Stabilization Delay ***
-  delay(500);  // Wait 500ms for external power circuits/regulator to stabilize
 
   // Standard guard for boards with native USB Serial
   if (Serial)
@@ -341,7 +346,7 @@ void setup() {
     }
 
   // Set CPU frequency for better performance/power balance
-  setCpuFrequencyMhz(160);
+  // setCpuFrequencyMhz(160);
 
   isConfigured = loadConfig();  // Load configuration
 }
